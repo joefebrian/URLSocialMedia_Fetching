@@ -1,0 +1,44 @@
+# ytx-metrics dependencies
+
+# Environment
+python-dotenv>=1.0.1
+
+# YouTube Data API
+google-api-python-client>=2.149.0
+google-auth>=2.35.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.1
+
+# X (Twitter) API
+tweepy>=4.14.0
+
+# HTTP / general
+requests>=2.32.3
+
+# Data processing & metrics
+pandas>=2.2.2
+python-dateutil>=2.9.0
+
+# Scheduling for periodic metric collection
+apscheduler>=3.10.4
+
+# Database (matches DATABASE_URL in .env)
+sqlalchemy>=2.0.36
+
+# Nice terminal output (optional but useful for CLI tools)
+rich>=13.9.4
+
+# Streamlit dashboard
+streamlit>=1.40.0
+
+# No additional export libs needed (using CSV for easy Google Sheets import)
+
+# Auth & DB
+bcrypt>=4.2.0
+psycopg2-binary>=2.9.9   # For PostgreSQL on deployment (Render, Railway, etc.)
+
+# Payments (Stripe recommended)
+stripe>=11.0.0
+
+# Grok (xAI) for smart niche inference
+openai>=1.54.0
