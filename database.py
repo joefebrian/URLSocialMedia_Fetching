@@ -178,12 +178,28 @@ def init_db():
     except Exception:
         pass
 
+    # Robust migration for usage columns - works even on old schemas or after failed previous inits
     for col in ["youtube_calls", "x_calls", "grok_calls", "grok_tokens"]:
         try:
-            cursor.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            if is_postgres:
+                # Use DO block to add column only if it doesn't exist - avoids "already exists" errors and transaction issues
+                cursor.execute(f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns 
+                            WHERE table_name='users' AND column_name='{col}'
+                        ) THEN
+                            ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0;
+                        END IF;
+                    END $$;
+                """)
+            else:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
             conn.commit()  # commit immediately after each successful ADD (Postgres safety)
         except Exception:
-            pass  # column already exists or other non-fatal
+            conn.rollback()  # reset transaction state on error for Postgres
+            pass  # ignore if can't add (e.g. permission or already there)
 
     conn.commit()  # final commit after all migrations/DDL
     conn.close()
@@ -193,6 +209,30 @@ def init_db():
     try:
         conn = get_db_connection()
         conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+    # One more explicit ensure for the usage columns migration (idempotent)
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        for col in ["youtube_calls", "x_calls", "grok_calls", "grok_tokens"]:
+            if bool(os.getenv("DATABASE_URL", "").startswith("postgres")):
+                cursor.execute(f"""
+                    DO $$
+                    BEGIN
+                        IF NOT EXISTS (
+                            SELECT 1 FROM information_schema.columns 
+                            WHERE table_name='users' AND column_name='{col}'
+                        ) THEN
+                            ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0;
+                        END IF;
+                    END $$;
+                """)
+            else:
+                cursor.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.commit()
         conn.close()
     except Exception:
         pass
@@ -442,6 +482,7 @@ def get_all_users() -> list:
     (e.g. on old DB schemas from previous deploys).
     The migration in init_db() will add the columns on startup.
     """
+    ensure_tables()  # extra safety
     conn = get_db_connection()
     cursor = _execute(conn, "SELECT * FROM users ORDER BY created_at DESC")
     users = []
@@ -457,25 +498,36 @@ def get_all_users() -> list:
     return users
 
 def increment_user_api_usage(user_id: int, youtube: int = 0, x: int = 0, grok: int = 0, grok_tokens: int = 0):
-    """Persistently increment per-user API usage counters."""
+    """Persistently increment per-user API usage counters.
+    Wrapped in try/except so missing columns on legacy DBs (e.g. Render Postgres from old deploys)
+    do not kill the fetch operation. Main quota_used is still updated separately.
+    """
     if not user_id:
         return
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     ph = _get_placeholder()
-    cursor = _execute(
-        conn,
-        f"""
-        UPDATE users SET
-            youtube_calls = COALESCE(youtube_calls, 0) + {ph},
-            x_calls = COALESCE(x_calls, 0) + {ph},
-            grok_calls = COALESCE(grok_calls, 0) + {ph},
-            grok_tokens = COALESCE(grok_tokens, 0) + {ph}
-        WHERE id = {ph}
-        """,
-        (youtube, x, grok, grok_tokens, user_id)
-    )
-    conn.commit()
-    conn.close()
+    try:
+        cursor = _execute(
+            conn,
+            f"""
+            UPDATE users SET
+                youtube_calls = COALESCE(youtube_calls, 0) + {ph},
+                x_calls = COALESCE(x_calls, 0) + {ph},
+                grok_calls = COALESCE(grok_calls, 0) + {ph},
+                grok_tokens = COALESCE(grok_tokens, 0) + {ph}
+            WHERE id = {ph}
+            """,
+            (youtube, x, grok, grok_tokens, user_id)
+        )
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        # Do not crash the fetch; granular counters are nice-to-have
+        # The main quota_used update in update_user_quota will still succeed
+        print(f"[DB] Warning: could not increment granular usage for user {user_id}: {e}")
+    finally:
+        conn.close()
 
 def reset_user_usage(user_id: int):
     """Reset all usage counters and quota for a user (admin action)."""
@@ -652,7 +704,11 @@ def init_payment_gateways_table():
     conn.close()
 
 
-# Initialize on import
+# Initialize on import (wrapped for robustness on production deploys like Render)
 if __name__ != "__main__":
-    init_db()
-    init_payment_gateways_table()
+    try:
+        init_db()
+        init_payment_gateways_table()
+    except Exception as e:
+        print(f"[DB] Warning: init failed (may be transient): {e}")
+        # App can still start; functions will retry via ensure_tables()
