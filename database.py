@@ -154,6 +154,10 @@ def init_db():
     conn.close()
     print("Database initialized.")
 
+    # Ensure the main super admin (hello@atlasnow.co) is always admin.
+    # This is called after table creation to guarantee the "users" table exists.
+    set_user_admin("hello@atlasnow.co", True)
+
 def hash_password(password: str) -> str:
     """Hash password using bcrypt."""
     return bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -595,5 +599,3 @@ def init_payment_gateways_table():
 if __name__ != "__main__":
     init_db()
     init_payment_gateways_table()
-    # One-time upgrade for super admin email if the user already exists
-    set_user_admin("hello@atlasnow.co", True)
