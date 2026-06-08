@@ -58,6 +58,17 @@ def _execute(conn, query, params=()):
     cursor.execute(query, params)
     return cursor
 
+
+def ensure_tables():
+    """Paranoid helper: ensure all tables exist (calls init if needed).
+    Safe to call from any function; uses try to avoid recursion issues.
+    """
+    try:
+        init_db()
+        init_payment_gateways_table()
+    except Exception:
+        pass  # don't crash the caller if init has transient issues
+
 def init_db():
     """Initialize database tables if they don't exist."""
     conn = get_db_connection()
@@ -89,6 +100,18 @@ def init_db():
                 created_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+    conn.commit()  # explicit commit after DDL for Postgres paranoia
+
+    # Force super admin right after users table is created (same connection/transaction)
+    # This UPDATE happens on the exact same cursor right after CREATE, so table is guaranteed to exist.
+    ph = "%s" if is_postgres else "?"
+    try:
+        cursor.execute(
+            f"UPDATE users SET is_admin = 1, is_subscribed = 1 WHERE email = {ph}",
+            ("hello@atlasnow.co",)
+        )
+    except Exception:
+        pass  # if row doesn't exist yet, fine (will be set on first signup via create_user)
 
     # Projects table - stores user's video tables or X profile lists
     if is_postgres:
@@ -123,6 +146,7 @@ def init_db():
                 FOREIGN KEY (parent_id) REFERENCES projects (id) ON DELETE CASCADE
             )
         """)
+    conn.commit()  # explicit commit after DDL for Postgres paranoia
 
     # Migration for existing DBs (works for both SQLite and Postgres)
     try:
@@ -150,13 +174,17 @@ def init_db():
         except Exception:
             pass
 
-    conn.commit()
+    conn.commit()  # explicit commit after all migrations/DDL
     conn.close()
     print("Database initialized.")
 
-    # Ensure the main super admin (hello@atlasnow.co) is always admin.
-    # This is called after table creation to guarantee the "users" table exists.
-    set_user_admin("hello@atlasnow.co", True)
+    # Extra paranoid commit in case of partial DDL in some Postgres setups
+    try:
+        conn = get_db_connection()
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 def hash_password(password: str) -> str:
     """Hash password using bcrypt."""
@@ -169,6 +197,7 @@ def verify_password(password: str, hashed: str) -> bool:
 # --- User functions ---
 def create_user(email: str, password: str) -> int | None:
     """Create a new user. Returns user_id or None if email exists."""
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     try:
         password_hash = hash_password(password)
@@ -216,6 +245,7 @@ def get_user_by_id(user_id: int):
 
 def update_user_quota(user_id: int, additional: int):
     """Add to the user's quota_used."""
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     ph = _get_placeholder()
     cursor = _execute(
@@ -257,6 +287,7 @@ def get_user_quota(user_id: int) -> dict:
 # --- Project functions ---
 def create_project(user_id: int, name: str, parent_id: int = None, is_folder: int = 0, project_type: str = "youtube") -> int:
     """Create a new empty project/folder for user. Returns project_id."""
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     now = datetime.now().isoformat()
     data_default = "[]" if not is_folder else None
@@ -304,6 +335,7 @@ def get_project(project_id: int, user_id: int):
 
 def save_project_data(project_id: int, user_id: int, data_json: str):
     """Save the table data (JSON string) to a project."""
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     now = datetime.now().isoformat()
     ph = _get_placeholder()
@@ -327,6 +359,7 @@ def load_project_data(project_id: int, user_id: int) -> list:
 
 def delete_project(project_id: int, user_id: int):
     """Delete project/folder and all its children recursively."""
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     ph = _get_placeholder()
     cursor = conn.cursor()
@@ -348,6 +381,7 @@ def rename_project(project_id: int, user_id: int, new_name: str):
     """Rename a project (with ownership check)."""
     if not new_name or not new_name.strip():
         return False
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     now = datetime.now().isoformat()
     ph = _get_placeholder()
@@ -371,6 +405,12 @@ def set_user_admin(email: str, is_admin: bool = True):
         # Hardcoded protection: super admin cannot be demoted
         logging.warning(f"Blocked attempt to demote super admin {email_clean}")
         return False
+
+    # Paranoid: ensure tables exist before any operation on Postgres
+    try:
+        init_db()
+    except Exception:
+        pass
 
     conn = get_db_connection()
     ph = _get_placeholder()
@@ -427,6 +467,7 @@ def increment_user_api_usage(user_id: int, youtube: int = 0, x: int = 0, grok: i
 
 def reset_user_usage(user_id: int):
     """Reset all usage counters and quota for a user (admin action)."""
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     ph = _get_placeholder()
     cursor = _execute(
@@ -449,6 +490,7 @@ def set_user_premium(user_id: int, is_premium: bool = True):
     """Manually activate/revoke premium for a user.
     Super admin cannot have premium revoked.
     """
+    ensure_tables()  # paranoid for Postgres
     user = get_user_by_id(user_id)
     if user and user.get("email", "").lower() == SUPER_ADMIN_EMAIL and not is_premium:
         logging.warning(f"Blocked attempt to revoke premium from super admin user_id={user_id}")
@@ -515,6 +557,7 @@ def get_payment_gateways():
 
 def save_payment_gateway(gateway: str, is_active: bool, config: dict):
     """Save or update a payment gateway config."""
+    ensure_tables()  # paranoid for Postgres
     conn = get_db_connection()
     ph = _get_placeholder()
     config_json = json.dumps(config or {})
@@ -564,6 +607,7 @@ def init_payment_gateways_table():
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.commit()  # explicit commit after DDL for Postgres paranoia
 
         # Seed default gateways if not exist (Postgres syntax)
         default_gateways = ['stripe', 'paypal', 'xendit']
@@ -582,6 +626,7 @@ def init_payment_gateways_table():
                 updated_at TEXT DEFAULT CURRENT_TIMESTAMP
             )
         """)
+        conn.commit()  # explicit commit after DDL
 
         # Seed default gateways if not exist (SQLite)
         default_gateways = ['stripe', 'paypal', 'xendit']
