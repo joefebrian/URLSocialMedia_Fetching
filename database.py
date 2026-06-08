@@ -85,9 +85,14 @@ def init_db():
                 quota_used INTEGER DEFAULT 0,
                 is_subscribed INTEGER DEFAULT 0,
                 is_admin INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                youtube_calls INTEGER DEFAULT 0,
+                x_calls INTEGER DEFAULT 0,
+                grok_calls INTEGER DEFAULT 0,
+                grok_tokens INTEGER DEFAULT 0
             )
         """)
+        conn.commit()  # explicit commit after CREATE for Postgres
     else:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -97,9 +102,14 @@ def init_db():
                 quota_used INTEGER DEFAULT 0,
                 is_subscribed INTEGER DEFAULT 0,
                 is_admin INTEGER DEFAULT 0,
-                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                youtube_calls INTEGER DEFAULT 0,
+                x_calls INTEGER DEFAULT 0,
+                grok_calls INTEGER DEFAULT 0,
+                grok_tokens INTEGER DEFAULT 0
             )
         """)
+        conn.commit()  # explicit commit after CREATE
     conn.commit()  # explicit commit after DDL for Postgres paranoia
 
     # Force super admin right after users table is created (same connection/transaction)
@@ -146,7 +156,7 @@ def init_db():
                 FOREIGN KEY (parent_id) REFERENCES projects (id) ON DELETE CASCADE
             )
         """)
-    conn.commit()  # explicit commit after DDL for Postgres paranoia
+    conn.commit()  # explicit commit after projects CREATE for Postgres paranoia
 
     # Migration for existing DBs (works for both SQLite and Postgres)
     try:
