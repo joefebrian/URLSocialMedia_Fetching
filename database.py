@@ -181,10 +181,11 @@ def init_db():
     for col in ["youtube_calls", "x_calls", "grok_calls", "grok_tokens"]:
         try:
             cursor.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+            conn.commit()  # commit immediately after each successful ADD (Postgres safety)
         except Exception:
-            pass
+            pass  # column already exists or other non-fatal
 
-    conn.commit()  # explicit commit after all migrations/DDL
+    conn.commit()  # final commit after all migrations/DDL
     conn.close()
     print("Database initialized.")
 
@@ -435,22 +436,23 @@ def set_user_admin(email: str, is_admin: bool = True):
     return success
 
 def get_all_users() -> list:
-    """Return all users for admin panel (sorted by created_at desc)."""
+    """Return all users for admin panel (sorted by created_at desc).
+    Defensive: uses SELECT * + setdefault so it doesn't crash if the
+    usage columns (youtube_calls etc.) haven't been added by migration yet
+    (e.g. on old DB schemas from previous deploys).
+    The migration in init_db() will add the columns on startup.
+    """
     conn = get_db_connection()
-    ph = _get_placeholder()
-    cursor = _execute(
-        conn,
-        f"""
-        SELECT id, email, created_at, quota_used, is_subscribed, is_admin,
-               COALESCE(youtube_calls, 0) as youtube_calls,
-               COALESCE(x_calls, 0) as x_calls,
-               COALESCE(grok_calls, 0) as grok_calls,
-               COALESCE(grok_tokens, 0) as grok_tokens
-        FROM users
-        ORDER BY created_at DESC
-        """
-    )
-    users = [dict(row) for row in cursor.fetchall()]
+    cursor = _execute(conn, "SELECT * FROM users ORDER BY created_at DESC")
+    users = []
+    for row in cursor.fetchall():
+        user = dict(row)
+        # Provide defaults for columns that may be missing in old DBs
+        user.setdefault('youtube_calls', 0)
+        user.setdefault('x_calls', 0)
+        user.setdefault('grok_calls', 0)
+        user.setdefault('grok_tokens', 0)
+        users.append(user)
     conn.close()
     return users
 
