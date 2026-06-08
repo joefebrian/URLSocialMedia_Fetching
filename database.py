@@ -4,10 +4,20 @@ import os
 import sqlite3
 import json
 import bcrypt
+import logging
 from datetime import datetime
 from pathlib import Path
 
 DB_PATH = "ytx_metrics.db"
+SUPER_ADMIN_EMAIL = "hello@atlasnow.co"
+
+# Setup logging for super admin protection attempts
+logging.basicConfig(
+    filename="super_admin_protection.log",
+    level=logging.WARNING,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
 
 def get_db_connection():
     """
@@ -54,34 +64,65 @@ def init_db():
     cursor = conn.cursor()
 
     # Users table
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            email TEXT UNIQUE NOT NULL,
-            password_hash TEXT NOT NULL,
-            quota_used INTEGER DEFAULT 0,
-            is_subscribed INTEGER DEFAULT 0,
-            is_admin INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        )
-    """)
+    is_postgres = bool(os.getenv("DATABASE_URL", "").startswith("postgres"))
+    if is_postgres:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id SERIAL PRIMARY KEY,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                quota_used INTEGER DEFAULT 0,
+                is_subscribed INTEGER DEFAULT 0,
+                is_admin INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+    else:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                quota_used INTEGER DEFAULT 0,
+                is_subscribed INTEGER DEFAULT 0,
+                is_admin INTEGER DEFAULT 0,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
     # Projects table - stores user's video tables or X profile lists
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS projects (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            parent_id INTEGER,  -- for tree structure (folders/projects hierarchy)
-            is_folder INTEGER DEFAULT 0,
-            name TEXT NOT NULL,
-            project_type TEXT DEFAULT 'youtube',  -- 'youtube' or 'x_profile'
-            data_json TEXT,  -- JSON array of rows from the pandas DF
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
-            FOREIGN KEY (parent_id) REFERENCES projects (id) ON DELETE CASCADE
-        )
-    """)
+    if is_postgres:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                parent_id INTEGER,
+                is_folder INTEGER DEFAULT 0,
+                name TEXT NOT NULL,
+                project_type TEXT DEFAULT 'youtube',
+                data_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+                FOREIGN KEY (parent_id) REFERENCES projects (id) ON DELETE CASCADE
+            )
+        """)
+    else:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS projects (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                parent_id INTEGER,
+                is_folder INTEGER DEFAULT 0,
+                name TEXT NOT NULL,
+                project_type TEXT DEFAULT 'youtube',
+                data_json TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+                FOREIGN KEY (parent_id) REFERENCES projects (id) ON DELETE CASCADE
+            )
+        """)
 
     # Migration for existing DBs (works for both SQLite and Postgres)
     try:
@@ -317,13 +358,22 @@ def rename_project(project_id: int, user_id: int, new_name: str):
     return success
 
 def set_user_admin(email: str, is_admin: bool = True):
-    """Set super admin status for a user by email. Also sets is_subscribed for unlimited."""
+    """Set super admin status for a user by email. Also sets is_subscribed for unlimited.
+    The main super admin (hello@atlasnow.co) cannot be demoted.
+    """
+    email_clean = email.lower().strip()
+
+    if email_clean == SUPER_ADMIN_EMAIL and not is_admin:
+        # Hardcoded protection: super admin cannot be demoted
+        logging.warning(f"Blocked attempt to demote super admin {email_clean}")
+        return False
+
     conn = get_db_connection()
     ph = _get_placeholder()
     cursor = _execute(
         conn,
         f"UPDATE users SET is_admin = {ph}, is_subscribed = {ph} WHERE email = {ph}",
-        (1 if is_admin else 0, 1 if is_admin else 0, email.lower().strip())
+        (1 if is_admin else 0, 1 if is_admin else 0, email_clean)
     )
     success = cursor.rowcount > 0
     conn.commit()
@@ -392,7 +442,14 @@ def reset_user_usage(user_id: int):
     conn.close()
 
 def set_user_premium(user_id: int, is_premium: bool = True):
-    """Manually activate/revoke premium for a user."""
+    """Manually activate/revoke premium for a user.
+    Super admin cannot have premium revoked.
+    """
+    user = get_user_by_id(user_id)
+    if user and user.get("email", "").lower() == SUPER_ADMIN_EMAIL and not is_premium:
+        logging.warning(f"Blocked attempt to revoke premium from super admin user_id={user_id}")
+        return False
+
     conn = get_db_connection()
     ph = _get_placeholder()
     cursor = _execute(
@@ -402,9 +459,141 @@ def set_user_premium(user_id: int, is_premium: bool = True):
     )
     conn.commit()
     conn.close()
+    return True
+
+
+def delete_user(user_id: int) -> bool:
+    """Delete a user from the database.
+    Super admin (hardcoded) cannot be deleted under any circumstances.
+    """
+    user = get_user_by_id(user_id)
+    if user and user.get("email", "").lower() == SUPER_ADMIN_EMAIL:
+        logging.warning(f"Blocked attempt to DELETE super admin from database. user_id={user_id}")
+        return False
+
+    # Hardcoded protection in query: explicitly exclude super admin email
+    conn = get_db_connection()
+    ph = _get_placeholder()
+    cursor = _execute(
+        conn,
+        f"DELETE FROM users WHERE id = {ph} AND email != {ph}",
+        (user_id, SUPER_ADMIN_EMAIL)
+    )
+    success = cursor.rowcount > 0
+    conn.commit()
+    conn.close()
+    if success:
+        logging.info(f"User deleted successfully: user_id={user_id}")
+    return success
+
+
+# --- Payment Gateway Config Functions ---
+
+def get_payment_gateways():
+    """Return all payment gateways with their config."""
+    conn = get_db_connection()
+    ph = _get_placeholder()
+    cursor = _execute(
+        conn,
+        f"SELECT gateway, is_active, config, updated_at FROM payment_gateways ORDER BY gateway"
+    )
+    gateways = []
+    for row in cursor.fetchall():
+        gw = dict(row)
+        try:
+            gw['config'] = json.loads(gw['config']) if gw.get('config') else {}
+        except:
+            gw['config'] = {}
+        gateways.append(gw)
+    conn.close()
+    return gateways
+
+
+def save_payment_gateway(gateway: str, is_active: bool, config: dict):
+    """Save or update a payment gateway config."""
+    conn = get_db_connection()
+    ph = _get_placeholder()
+    config_json = json.dumps(config or {})
+    now = datetime.now().isoformat()
+
+    cursor = _execute(
+        conn,
+        f"""
+        UPDATE payment_gateways 
+        SET is_active = {ph}, config = {ph}, updated_at = {ph}
+        WHERE gateway = {ph}
+        """,
+        (1 if is_active else 0, config_json, now, gateway)
+    )
+
+    if cursor.rowcount == 0:
+        # Insert if not exists
+        _execute(
+            conn,
+            f"INSERT INTO payment_gateways (gateway, is_active, config) VALUES ({ph}, {ph}, {ph})",
+            (gateway, 1 if is_active else 0, config_json)
+        )
+
+    conn.commit()
+    conn.close()
+    return True
+
+
+def get_active_payment_gateways():
+    """Return only active payment gateways."""
+    all_gw = get_payment_gateways()
+    return [gw for gw in all_gw if gw.get('is_active')]
+
+def init_payment_gateways_table():
+    """Create payment gateways config table if not exists."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    is_postgres = bool(os.getenv("DATABASE_URL", "").startswith("postgres"))
+
+    if is_postgres:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS payment_gateways (
+                id SERIAL PRIMARY KEY,
+                gateway TEXT UNIQUE NOT NULL,
+                is_active INTEGER DEFAULT 0,
+                config TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Seed default gateways if not exist (Postgres syntax)
+        default_gateways = ['stripe', 'paypal', 'xendit']
+        for gw in default_gateways:
+            cursor.execute(
+                "INSERT INTO payment_gateways (gateway, is_active, config) VALUES (%s, 0, '{}') ON CONFLICT (gateway) DO NOTHING",
+                (gw,)
+            )
+    else:
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS payment_gateways (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gateway TEXT UNIQUE NOT NULL,
+                is_active INTEGER DEFAULT 0,
+                config TEXT,
+                updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        # Seed default gateways if not exist (SQLite)
+        default_gateways = ['stripe', 'paypal', 'xendit']
+        for gw in default_gateways:
+            cursor.execute(
+                "INSERT OR IGNORE INTO payment_gateways (gateway, is_active, config) VALUES (?, 0, '{}')",
+                (gw,)
+            )
+
+    conn.commit()
+    conn.close()
+
 
 # Initialize on import
 if __name__ != "__main__":
     init_db()
+    init_payment_gateways_table()
     # One-time upgrade for super admin email if the user already exists
     set_user_admin("hello@atlasnow.co", True)
