@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: metric-reports
+    env: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.headless true --server.port $PORT --browser.gatherUsageStats false
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: metric-reports-db
+          property: connectionString
+      - key: YOUTUBE_API_KEY
+        sync: false
+      - key: X_BEARER_TOKEN
+        sync: false
+      - key: XAI_API_KEY
+        sync: false
+      - key: PAYPAL_CLIENT_ID
+        sync: false
+      - key: PAYPAL_CLIENT_SECRET
+        sync: false
+      - key: PAYPAL_MODE
+        value: live
+      # Optional - uncomment if using others
+      # - key: STRIPE_SECRET_KEY
+      #   sync: false
+      # - key: XENDIT_SECRET_KEY
+      #   sync: false
+
+databases:
+  - name: metric-reports-db
+    plan: free
+    region: singapore
